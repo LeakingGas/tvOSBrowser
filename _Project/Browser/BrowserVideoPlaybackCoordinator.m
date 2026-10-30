@@ -13,6 +13,8 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
 @property (nonatomic, weak) id<BrowserVideoPlaybackCoordinatorHost> host;
 @property (nonatomic) BrowserDOMInteractionService *domInteractionService;
 @property (nonatomic) BrowserYouTubeExtractor *youTubeExtractor;
+@property (nonatomic, copy, nullable) NSString *capturedHLSURLString;
+@property (nonatomic, copy, nullable) NSString *capturedHLSRefererString;
 
 @end
 
@@ -148,7 +150,60 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
         }
     }
 
+    // Sites that play HLS through hls.js/MSE expose only a blob: URL on the
+    // <video> element. Fall back to the most recent .m3u8 playlist the page
+    // (or one of its frames) requested, which AVPlayer can play natively.
+    if (videoInfo.count > 0) {
+        NSString *capturedHLSURLString = [self latestCapturedHLSURLString];
+        if ([self isNativePlayableVideoURLString:capturedHLSURLString]) {
+            return capturedHLSURLString;
+        }
+    }
+
     return primarySource;
+}
+
+- (nullable NSString *)latestCapturedHLSURLString {
+    NSString *script = @"(function(){"
+        "var a = window.__tvbHLS || [];"
+        "if (!a.length) { return ''; }"
+        "var g = a[a.length - 1].g;"
+        "for (var i = 0; i < a.length; i++) { if (a[i].g === g) { return JSON.stringify(a[i]); } }"
+        "return '';"
+    "})()";
+    NSString *result = [self.host.browserWebView stringByEvaluatingJavaScriptFromString:script];
+    if (result.length == 0) {
+        return nil;
+    }
+    NSData *data = [result dataUsingEncoding:NSUTF8StringEncoding];
+    id object = data != nil ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if (![object isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
+    NSString *URLString = [object[@"url"] isKindOfClass:[NSString class]] ? object[@"url"] : nil;
+    NSString *referer = [object[@"ref"] isKindOfClass:[NSString class]] ? object[@"ref"] : nil;
+    self.capturedHLSURLString = URLString;
+    self.capturedHLSRefererString = referer.length > 0 ? referer : self.host.browserWebView.request.URL.absoluteString;
+    return URLString;
+}
+
+- (nullable NSDictionary<NSString *, NSString *> *)capturedHLSHeadersForURL:(NSURL *)URL {
+    if (URL == nil || self.capturedHLSURLString.length == 0 ||
+        ![URL.absoluteString isEqualToString:self.capturedHLSURLString]) {
+        return nil;
+    }
+    NSMutableDictionary<NSString *, NSString *> *headers = [NSMutableDictionary dictionary];
+    NSString *userAgent = [[NSUserDefaults standardUserDefaults] stringForKey:kUserAgentDefaultsKey];
+    if (userAgent.length > 0) {
+        headers[@"User-Agent"] = userAgent;
+    }
+    NSURL *refererURL = self.capturedHLSRefererString.length > 0 ? [NSURL URLWithString:self.capturedHLSRefererString] : nil;
+    if (refererURL != nil && refererURL.host.length > 0) {
+        headers[@"Referer"] = refererURL.absoluteString;
+        headers[@"Origin"] = [NSString stringWithFormat:@"%@://%@%@", refererURL.scheme ?: @"https", refererURL.host,
+                              refererURL.port != nil ? [NSString stringWithFormat:@":%@", refererURL.port] : @""];
+    }
+    return headers.count > 0 ? headers : nil;
 }
 
 - (BOOL)isNativePlayableVideoURLString:(NSString *)URLString {
@@ -173,7 +228,7 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
 }
 
 - (void)presentNativeVideoPlayerForURL:(NSURL *)URL title:(NSString *)title {
-    [self presentNativeVideoPlayerForURL:URL title:title requestHeaders:nil cookies:nil];
+    [self presentNativeVideoPlayerForURL:URL title:title requestHeaders:[self capturedHLSHeadersForURL:URL] cookies:nil];
 }
 
 - (void)presentNativeVideoPlayerForURL:(NSURL *)URL

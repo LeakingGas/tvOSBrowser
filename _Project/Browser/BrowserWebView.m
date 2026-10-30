@@ -295,6 +295,63 @@ static void BrowserConfigurePrivateMediaPreferences(id configuration) {
     BrowserSetBooleanSelectorIfAvailable(preferences, @"_setVideoQualityIncludesDisplayCompositingEnabled:", YES);
 }
 
+static NSString *BrowserHLSCaptureScript(void) {
+    return
+    @"(function(){"
+        "if (window.__tvbHLSHookInstalled) { return; }"
+        "window.__tvbHLSHookInstalled = true;"
+        "window.__tvbHLS = window.__tvbHLS || [];"
+        "var isTop = false;"
+        "try { isTop = (window.top === window); } catch (e) { isTop = false; }"
+        "function isHLS(u) { return /\\.m3u8(\\?|#|$)/i.test(String(u || '')); }"
+        "function abs(u) { try { return String(new URL(String(u), location.href)); } catch (e) { return String(u || ''); } }"
+        "function store(u, ref) {"
+            "var list = window.__tvbHLS;"
+            "var now = Date.now();"
+            "var last = list.length ? list[list.length - 1] : null;"
+            "if (last && last.url === u) { last.t = now; return; }"
+            "var group = (last && (now - last.t) < 4000) ? last.g : now;"
+            "list.push({ url: u, ref: ref, g: group, t: now });"
+            "if (list.length > 40) { list.splice(0, list.length - 40); }"
+        "}"
+        "function record(u) {"
+            "if (!isHLS(u)) { return; }"
+            "var url = abs(u);"
+            "if (!/^https?:/i.test(url)) { return; }"
+            "store(url, location.href);"
+            "if (!isTop) { try { window.top.postMessage({ __tvbHLS: url, ref: location.href }, '*'); } catch (e) {} }"
+        "}"
+        "if (isTop) {"
+            "window.addEventListener('message', function(ev) {"
+                "var d = ev && ev.data;"
+                "if (d && typeof d === 'object' && typeof d.__tvbHLS === 'string' && isHLS(d.__tvbHLS)) { store(d.__tvbHLS, String(d.ref || '')); }"
+            "}, false);"
+        "}"
+        "try {"
+            "var origOpen = XMLHttpRequest.prototype.open;"
+            "XMLHttpRequest.prototype.open = function(method, url) { try { record(url); } catch (e) {} return origOpen.apply(this, arguments); };"
+        "} catch (e) {}"
+        "try {"
+            "if (window.fetch) {"
+                "var origFetch = window.fetch;"
+                "window.fetch = function(input) {"
+                    "try { record(typeof input === 'string' ? input : (input && input.url)); } catch (e) {}"
+                    "return origFetch.apply(this, arguments);"
+                "};"
+            "}"
+        "} catch (e) {}"
+        "try {"
+            "var desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');"
+            "if (desc && desc.set) {"
+                "Object.defineProperty(HTMLMediaElement.prototype, 'src', {"
+                    "configurable: true, enumerable: desc.enumerable, get: desc.get,"
+                    "set: function(v) { try { record(v); } catch (e) {} return desc.set.call(this, v); }"
+                "});"
+            "}"
+        "} catch (e) {}"
+    "})();";
+}
+
 static NSString *BrowserYouTubeRequestCaptureScript(void) {
     return
     @"(function(){"
@@ -480,6 +537,12 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
     userScript = ((id (*)(id, SEL, id, NSInteger, BOOL))objc_msgSend)(userScript, userScriptInitializer, BrowserYouTubeRequestCaptureScript(), 0, NO);
     if (userScript != nil) {
         ((void (*)(id, SEL, id))objc_msgSend)(userContentController, addUserScriptSelector, userScript);
+    }
+
+    id hlsUserScript = ((id (*)(id, SEL))objc_msgSend)((id)userScriptClass, @selector(alloc));
+    hlsUserScript = ((id (*)(id, SEL, id, NSInteger, BOOL))objc_msgSend)(hlsUserScript, userScriptInitializer, BrowserHLSCaptureScript(), 0, NO);
+    if (hlsUserScript != nil) {
+        ((void (*)(id, SEL, id))objc_msgSend)(userContentController, addUserScriptSelector, hlsUserScript);
     }
 }
 
